@@ -782,9 +782,13 @@ app.post("/creatives/:id/video",requireAuth,requireCsrf,async(req,res)=>{
    RETURNING id`,
   [uid,id,provider,JSON.stringify(payload)]
 );
-  payload.video_job_id = iq.rows[0].id;
-  payload.callback_url=`${APP_URL}/api/video-jobs/${jobId}/callback`;
-  const secret=String(process.env.VIDEO_CALLBACK_SECRET||"").trim();
+
+const jobId = iq.rows[0].id;
+
+payload.video_job_id = jobId;
+payload.callback_url = `${APP_URL}/api/video-jobs/${jobId}/callback`;
+
+const secret = String(process.env.VIDEO_CALLBACK_SECRET || "").trim();
   const headers={"content-type":"application/json"};
   if(secret)headers["x-affiliatelab-secret"]=secret;
   try{
