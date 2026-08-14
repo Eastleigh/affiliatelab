@@ -776,10 +776,13 @@ app.post("/creatives/:id/video",requireAuth,requireCsrf,async(req,res)=>{
     }:null,
     callback_url:`${APP_URL}/api/video-jobs/CALLBACK_ID/callback`
   };
-  const iq=await pool.query(`INSERT INTO video_jobs(user_id,creative_pack_id,provider,status,request_payload) VALUES($1,$2,$3,'queued',$4::jsonb) RETURNING id`,
-    [uid,id,provider,JSON.stringify(payload)]);
-  const jobId=iq.rows[0].id;
-  payload.video_job_id=jobId;
+  const iq = await pool.query(
+  `INSERT INTO video_jobs(user_id,creative_pack_id,provider,status,request_payload)
+   VALUES($1,$2,$3,'queued',$4::jsonb)
+   RETURNING id`,
+  [uid,id,provider,JSON.stringify(payload)]
+);
+  payload.video_job_id = iq.rows[0].id;
   payload.callback_url=`${APP_URL}/api/video-jobs/${jobId}/callback`;
   const secret=String(process.env.VIDEO_CALLBACK_SECRET||"").trim();
   const headers={"content-type":"application/json"};
