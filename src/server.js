@@ -60,20 +60,41 @@ function setSession(res,user){
   const token=jwt.sign({sub:user.id,email:user.email,name:user.name,csrf},JWT_SECRET,{expiresIn:"7d",issuer:"affiliatelab"});
   res.cookie("affiliatelab_session",token,{httpOnly:true,secure:isProd,sameSite:"lax",maxAge:7*24*3600*1000,path:"/"});
 }
-function requireAuth(req,res,next){const s=sessionFrom(req);if(!s)return res.redirect("/login");req.user=s;next();}
-function requireCsrf(req,res,next){const s=sessionFrom(req),t=req.body?._csrf||req.get("x-csrf-token");if(!s||!t||t!==s.csrf)return res.status(403).send("Invalid CSRF token");req.user=s;next();}
+async function requireAuth(req,res,next){
+  const s=sessionFrom(req);
+  if(!s)return res.redirect("/login");
+  try{
+    const q=await pool.query("SELECT id,name,email,plan,role,status FROM users WHERE id=$1",[+s.sub]);
+    const u=q.rows[0];
+    if(!u||u.status==="disabled"){res.clearCookie("affiliatelab_session",{path:"/"});return res.redirect("/login");}
+    req.user={...s,...u,sub:u.id};
+    next();
+  }catch(e){next(e);}
+}
+function requireCsrf(req,res,next){const s=sessionFrom(req),t=req.body?._csrf||req.get("x-csrf-token");if(!s||!t||t!==s.csrf)return res.status(403).send("Invalid CSRF token");req.user={...(req.user||{}),...s};next();}
+async function requireAdmin(req,res,next){
+  try{
+    if(!req.user)return res.redirect("/login");
+    const q=await pool.query("SELECT role,status FROM users WHERE id=$1",[+req.user.sub]);
+    const u=q.rows[0];
+    if(!u||u.status==="disabled"||u.role!=="admin")return res.status(403).send(shell({title:"Access denied",user:req.user,body:`<div class="header"><div><h2>Admin access required</h2><p>This area is reserved for AffiliateLab administrators.</p></div><a class="btn" href="/dashboard">Back to dashboard</a></div>`}));
+    req.user.role=u.role;
+    next();
+  }catch(e){next(e);}
+}
 
 function shell({title,user,active="",body}){
   const nav=(u,l,k,i)=>`<a class="${active===k?"active":""}" href="${u}">${i} ${l}</a>`;
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} · AffiliateLab</title><link rel="stylesheet" href="/static/app.css"></head><body>
   <div class="app"><aside class="sidebar"><div class="brand"><div class="logo">⚗</div><div><h1>AffiliateLab</h1><small>Creator Intelligence</small></div></div>
-  <nav class="nav">${nav("/dashboard","Dashboard","dashboard","▣")}${nav("/products","My Products","products","▤")}${nav("/products/new","Add Product","new","＋")}${nav("/imports/kalodata","Import CSV","import","⇧")}${nav("/opportunities","Top Opportunities","opportunities","▥")}${nav("/avatar","My Avatar","avatar","◉")}${nav("/creatives","Creative Studio","creatives","▻")}${nav("/settings","Settings","settings","⚙")}</nav>
+  <nav class="nav">${nav("/dashboard","Dashboard","dashboard","▣")}${nav("/products","My Products","products","▤")}${nav("/products/new","Add Product","new","＋")}${nav("/imports/kalodata","Import CSV","import","⇧")}${nav("/opportunities","Top Opportunities","opportunities","▥")}${nav("/avatar","My Avatar","avatar","◉")}${nav("/creatives","Creative Studio","creatives","▻")}${nav("/settings","Settings","settings","⚙")}${user.role==="admin"?nav("/admin","Admin","admin","◆"):""}</nav>
   <div class="sidebar-bottom"><div class="userbox"><b>${esc(user.name||"Creator Pro")}</b><div class="email">${esc(user.email)}</div><a class="logout" href="/logout">Sign out</a></div></div></aside><main class="main">${body}</main></div></body></html>`;
 }
 function authPage(title,content){
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} · AffiliateLab</title><link rel="stylesheet" href="/static/app.css"></head><body class="authbody"><div class="authcard"><div class="authbrand"><div class="logo">⚗</div><h1>AffiliateLab</h1><div class="muted">AI-powered affiliate operating system</div></div>${content}</div></body></html>`;
 }
 
+let SCORE_CONFIG={sales_weight:24,commission_weight:20,competition_weight:16,visual_weight:16,impulse_weight:14,problem_weight:10,priority_threshold:80,test_threshold:68,watch_threshold:55};
 function scoreProduct(p){
   const price=+p.price||0,comm=+p.commission_percent||0,s7=+p.sales_7d||0,s30=+p.sales_30d||0,creators=+p.creator_count||0,videos=+p.video_count||0;
   const salesMomentum=Math.max(0,Math.min(100,Math.round((s7*4/Math.max(1,s30))*70+Math.min(30,s7/100))));
@@ -81,8 +102,10 @@ function scoreProduct(p){
   const commission=Math.min(100,Math.round(comm*4));
   const priceScore=price<=15?95:price<=40?90:price<=70?78:price<=120?62:45;
   const visual=82,problem=78,impulse=Math.round((priceScore+commission)/2);
-  const total=Math.max(0,Math.min(100,Math.round(salesMomentum*.24+commission*.20+competition*.16+visual*.16+impulse*.14+problem*.10)));
-  const recommendation=total>=80?"PRIORITY TEST":total>=68?"TEST":total>=55?"WATCH":"PASS";
+  const weights=[SCORE_CONFIG.sales_weight,SCORE_CONFIG.commission_weight,SCORE_CONFIG.competition_weight,SCORE_CONFIG.visual_weight,SCORE_CONFIG.impulse_weight,SCORE_CONFIG.problem_weight].map(Number);
+  const denom=Math.max(1,weights.reduce((a,b)=>a+b,0));
+  const total=Math.max(0,Math.min(100,Math.round((salesMomentum*weights[0]+commission*weights[1]+competition*weights[2]+visual*weights[3]+impulse*weights[4]+problem*weights[5])/denom)));
+  const recommendation=total>=SCORE_CONFIG.priority_threshold?"PRIORITY TEST":total>=SCORE_CONFIG.test_threshold?"TEST":total>=SCORE_CONFIG.watch_threshold?"WATCH":"PASS";
   return {salesMomentum,competition,commission,visual,problem,impulse,total,recommendation};
 }
 
@@ -138,8 +161,14 @@ async function migrate(){
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     plan TEXT NOT NULL DEFAULT 'creator_pro',
+    role TEXT NOT NULL DEFAULT 'creator',
+    status TEXT NOT NULL DEFAULT 'active',
+    last_login_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   );
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'creator';
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;
   ALTER TABLE products ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users(id) ON DELETE CASCADE;
   ALTER TABLE products ADD COLUMN IF NOT EXISTS description TEXT;
   ALTER TABLE products ADD COLUMN IF NOT EXISTS affiliate_network TEXT DEFAULT 'TikTok Shop';
@@ -152,7 +181,39 @@ async function migrate(){
   CREATE UNIQUE INDEX IF NOT EXISTS products_user_url_unique ON products(user_id,product_url)
     WHERE user_id IS NOT NULL AND product_url IS NOT NULL;
   CREATE INDEX IF NOT EXISTS products_user_score_idx ON products(user_id,affiliate_score DESC NULLS LAST);
+  CREATE TABLE IF NOT EXISTS import_runs(
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+    source TEXT NOT NULL DEFAULT 'kalodata_csv',
+    total_rows INT NOT NULL DEFAULT 0,
+    imported_rows INT NOT NULL DEFAULT 0,
+    skipped_rows INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  CREATE TABLE IF NOT EXISTS app_settings(
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT '',
+    updated_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  CREATE TABLE IF NOT EXISTS admin_audit_log(
+    id BIGSERIAL PRIMARY KEY,
+    admin_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+    action TEXT NOT NULL,
+    target_type TEXT,
+    target_id TEXT,
+    details TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
   `);
+  const adminEmail=String(process.env.ADMIN_EMAIL||"").trim().toLowerCase();
+  if(adminEmail) await pool.query("UPDATE users SET role='admin' WHERE lower(email)=$1",[adminEmail]);
+  const admins=await pool.query("SELECT COUNT(*)::int count FROM users WHERE role='admin'");
+  if(admins.rows[0].count===0){
+    await pool.query("UPDATE users SET role='admin' WHERE id=(SELECT id FROM users ORDER BY created_at,id LIMIT 1)");
+  }
+  const scoreRows=await pool.query("SELECT key,value FROM app_settings WHERE key LIKE 'score.%'");
+  for(const r of scoreRows){const k=r.key.replace('score.','');if(Object.hasOwn(SCORE_CONFIG,k))SCORE_CONFIG[k]=Number(r.value);}
 }
 await migrate();
 
@@ -170,8 +231,9 @@ app.post("/signup",async(req,res)=>{
 app.get("/login",(req,res)=>res.send(authPage("Sign in",`<form method="post" action="/login"><div class="field"><label>Email</label><input name="email" type="email" required autocomplete="email"></div><div class="field"><label>Password</label><input name="password" type="password" required autocomplete="current-password"></div><button class="btn primary">Sign in</button></form><div class="authfoot">New here? <a href="/signup">Create Creator Pro account</a></div>`)));
 app.post("/login",async(req,res)=>{
   const email=String(req.body.email||"").trim().toLowerCase(),password=String(req.body.password||"");
-  const q=await pool.query("SELECT id,name,email,password_hash FROM users WHERE email=$1",[email]);const u=q.rows[0];
-  if(!u||!(await bcrypt.compare(password,u.password_hash)))return res.status(401).send(authPage("Sign in",`<div class="flash err">Email or password is incorrect.</div><div class="authfoot"><a href="/login">Try again</a></div>`));
+  const q=await pool.query("SELECT id,name,email,password_hash,role,status FROM users WHERE email=$1",[email]);const u=q.rows[0];
+  if(!u||u.status==="disabled"||!(await bcrypt.compare(password,u.password_hash)))return res.status(401).send(authPage("Sign in",`<div class="flash err">Email or password is incorrect.</div><div class="authfoot"><a href="/login">Try again</a></div>`));
+  await pool.query("UPDATE users SET last_login_at=NOW() WHERE id=$1",[u.id]);
   setSession(res,u);res.redirect("/dashboard");
 });
 app.get("/logout",(req,res)=>{res.clearCookie("affiliatelab_session",{path:"/"});res.redirect("/login");});
@@ -276,6 +338,7 @@ app.post("/imports/kalodata",requireAuth,requireCsrf,async(req,res)=>{
       imported++;
     }
     await client.query("COMMIT");
+    await pool.query("INSERT INTO import_runs(user_id,source,total_rows,imported_rows,skipped_rows) VALUES($1,'kalodata_csv',$2,$3,$4)",[uid,rows.length,imported,skipped]);
     res.json({ok:true,imported,skipped,total:rows.length});
   }catch(e){await client.query("ROLLBACK");throw e;}finally{client.release();}
 });
@@ -291,6 +354,78 @@ app.get("/opportunities",requireAuth,async(req,res)=>{
   const rows=q.rows.map((p,i)=>`<tr><td>${i+1}</td><td><a href="/products/${p.id}"><b>${esc(p.name)}</b></a></td><td>${esc(p.category||"—")}</td><td><b>${p.affiliate_score??"—"}</b></td><td>${+p.commission_percent||0}%</td><td>${num(p.sales_30d)}</td><td><span class="pill ${esc(p.status)}">${esc(p.status)}</span></td></tr>`).join("");
   res.send(shell({title:"Top Opportunities",user:req.user,active:"opportunities",body:`<div class="header"><div><h2>Top Opportunities</h2><p>Rank products by AffiliateLab Opportunity Score.</p></div><a class="btn primary" href="/imports/kalodata">⇧ Import More</a></div><section class="card"><div class="tablewrap">${rows?`<table class="table"><thead><tr><th>#</th><th>Product</th><th>Category</th><th>Score</th><th>Commission</th><th>30d Sales</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`:`<div class="empty">Add products to create your ranking.</div>`}</div></section>`}));
 });
+
+function adminTabs(active){
+  const items=[["/admin","Overview","overview"],["/admin/users","Users","users"],["/admin/products","Products","products"],["/admin/imports","Imports","imports"],["/admin/scoring","Scoring","scoring"],["/admin/seo","SEO / Content","seo"],["/admin/billing","Billing","billing"],["/admin/settings","App Settings","settings"]];
+  return `<div class="actions" style="margin-bottom:18px;flex-wrap:wrap">${items.map(([u,l,k])=>`<a class="btn ${active===k?"primary":""}" href="${u}">${l}</a>`).join("")}</div>`;
+}
+async function audit(adminId,action,targetType="",targetId="",details=""){
+  await pool.query("INSERT INTO admin_audit_log(admin_user_id,action,target_type,target_id,details) VALUES($1,$2,$3,$4,$5)",[adminId,action,targetType,targetId,String(details||"").slice(0,4000)]);
+}
+app.get("/admin",requireAuth,requireAdmin,async(req,res)=>{
+  const [u,p,i,a]=await Promise.all([
+    pool.query("SELECT COUNT(*)::int total,COUNT(*) FILTER(WHERE status='active')::int active,COUNT(*) FILTER(WHERE role='admin')::int admins FROM users"),
+    pool.query("SELECT COUNT(*)::int total,COUNT(*) FILTER(WHERE status='winner')::int winners,COALESCE(AVG(affiliate_score),0)::numeric(10,1) avg_score FROM products WHERE user_id IS NOT NULL"),
+    pool.query("SELECT COALESCE(SUM(imported_rows),0)::int imported,COUNT(*)::int runs FROM import_runs"),
+    pool.query("SELECT l.*,u.email FROM admin_audit_log l LEFT JOIN users u ON u.id=l.admin_user_id ORDER BY l.created_at DESC LIMIT 8")
+  ]);
+  const us=u.rows[0],ps=p.rows[0],im=i.rows[0];
+  const activity=a.rows.map(x=>`<tr><td>${esc(x.action)}</td><td>${esc(x.email||"system")}</td><td>${esc(x.target_type||"—")}</td><td>${new Date(x.created_at).toLocaleString()}</td></tr>`).join("");
+  res.send(shell({title:"Admin",user:req.user,active:"admin",body:`<div class="header"><div><div class="kicker">Owner Console</div><h2>AffiliateLab Admin</h2><p>Manage users, products, imports, scoring, SEO and platform settings.</p></div><a class="btn" href="/dashboard">Creator dashboard</a></div>${adminTabs("overview")}<section class="stats"><div class="card stat"><div class="label">Users</div><div class="value">${us.total}</div></div><div class="card stat"><div class="label">Active</div><div class="value">${us.active}</div></div><div class="card stat"><div class="label">Products</div><div class="value">${ps.total}</div></div><div class="card stat"><div class="label">CSV Products Imported</div><div class="value">${im.imported}</div></div></section><section class="hero"><div class="card"><div class="cardpad"><div class="kicker">Platform health</div><h3>${ps.winners} winners · ${im.runs} import runs</h3><p>Average product score: <b>${ps.avg_score}</b>. Admin accounts: <b>${us.admins}</b>.</p></div></div><div class="card"><div class="cardpad"><div class="kicker">Admin-only</div><h3>Your creator login now unlocks this console</h3><p>Customers cannot access any <code>/admin</code> route unless their role is explicitly set to admin.</p></div></div></section><section class="card"><div class="head">Recent Admin Activity</div><div class="tablewrap">${activity?`<table class="table"><thead><tr><th>Action</th><th>Admin</th><th>Target</th><th>When</th></tr></thead><tbody>${activity}</tbody></table>`:`<div class="empty">No admin changes yet.</div>`}</div></section>`}));
+});
+app.get("/admin/users",requireAuth,requireAdmin,async(req,res)=>{
+  const q=await pool.query(`SELECT u.id,u.name,u.email,u.plan,u.role,u.status,u.created_at,u.last_login_at,COUNT(p.id)::int product_count FROM users u LEFT JOIN products p ON p.user_id=u.id GROUP BY u.id ORDER BY u.created_at DESC`);
+  const rows=q.rows.map(u=>`<tr><td><b>${esc(u.name)}</b><div class="muted">${esc(u.email)}</div></td><td>${esc(u.plan)}</td><td>${esc(u.role)}</td><td><span class="pill ${u.status==='active'?'winner':'rejected'}">${esc(u.status)}</span></td><td>${u.product_count}</td><td>${u.last_login_at?new Date(u.last_login_at).toLocaleString():"Never"}</td><td><form method="post" action="/admin/users/${u.id}" style="display:flex;gap:6px;align-items:center"><input type="hidden" name="_csrf" value="${esc(req.user.csrf)}"><select name="role"><option ${u.role==='creator'?'selected':''}>creator</option><option ${u.role==='admin'?'selected':''}>admin</option></select><select name="status"><option ${u.status==='active'?'selected':''}>active</option><option ${u.status==='disabled'?'selected':''}>disabled</option></select><select name="plan"><option ${u.plan==='creator_pro'?'selected':''}>creator_pro</option><option ${u.plan==='internal'?'selected':''}>internal</option><option ${u.plan==='free'?'selected':''}>free</option></select><button class="btn">Save</button></form></td></tr>`).join("");
+  res.send(shell({title:"Admin Users",user:req.user,active:"admin",body:`<div class="header"><div><h2>Users</h2><p>Control access, roles and plans.</p></div></div>${adminTabs("users")}<section class="card"><div class="tablewrap"><table class="table"><thead><tr><th>User</th><th>Plan</th><th>Role</th><th>Status</th><th>Products</th><th>Last login</th><th>Controls</th></tr></thead><tbody>${rows}</tbody></table></div></section>`}));
+});
+app.post("/admin/users/:id",requireAuth,requireAdmin,requireCsrf,async(req,res)=>{
+  const id=+req.params.id,role=["creator","admin"].includes(req.body.role)?req.body.role:"creator",status=["active","disabled"].includes(req.body.status)?req.body.status:"active",plan=["creator_pro","internal","free"].includes(req.body.plan)?req.body.plan:"creator_pro";
+  if(id===+req.user.sub&&role!=="admin")return res.status(400).send("You cannot remove your own admin role.");
+  if(id===+req.user.sub&&status!=="active")return res.status(400).send("You cannot disable your own account.");
+  await pool.query("UPDATE users SET role=$1,status=$2,plan=$3 WHERE id=$4",[role,status,plan,id]);
+  await audit(+req.user.sub,"user.updated","user",String(id),JSON.stringify({role,status,plan}));
+  res.redirect("/admin/users");
+});
+app.get("/admin/products",requireAuth,requireAdmin,async(req,res)=>{
+  const q=await pool.query(`SELECT p.id,p.name,p.category,p.price,p.affiliate_score,p.status,p.source,p.updated_at,u.email FROM products p LEFT JOIN users u ON u.id=p.user_id WHERE p.user_id IS NOT NULL ORDER BY p.updated_at DESC LIMIT 300`);
+  const rows=q.rows.map(p=>`<tr><td><b>${esc(p.name)}</b><div class="muted">${esc(p.email||"—")}</div></td><td>${esc(p.category||"—")}</td><td>${money(p.price)}</td><td><b>${p.affiliate_score??"—"}</b></td><td>${esc(p.source||"manual")}</td><td>${esc(p.status)}</td><td>${new Date(p.updated_at).toLocaleString()}</td></tr>`).join("");
+  res.send(shell({title:"Admin Products",user:req.user,active:"admin",body:`<div class="header"><div><h2>All Products</h2><p>Cross-account product visibility for support and operations.</p></div></div>${adminTabs("products")}<section class="card"><div class="tablewrap"><table class="table"><thead><tr><th>Product / Owner</th><th>Category</th><th>Price</th><th>Score</th><th>Source</th><th>Status</th><th>Updated</th></tr></thead><tbody>${rows}</tbody></table></div></section>`}));
+});
+app.get("/admin/imports",requireAuth,requireAdmin,async(req,res)=>{
+  const q=await pool.query(`SELECT i.*,u.email FROM import_runs i LEFT JOIN users u ON u.id=i.user_id ORDER BY i.created_at DESC LIMIT 200`);
+  const rows=q.rows.map(i=>`<tr><td>${esc(i.email||"—")}</td><td>${esc(i.source)}</td><td>${i.total_rows}</td><td>${i.imported_rows}</td><td>${i.skipped_rows}</td><td>${new Date(i.created_at).toLocaleString()}</td></tr>`).join("");
+  res.send(shell({title:"Admin Imports",user:req.user,active:"admin",body:`<div class="header"><div><h2>CSV Imports</h2><p>Monitor bulk product ingestion and skipped rows.</p></div></div>${adminTabs("imports")}<section class="card"><div class="tablewrap">${rows?`<table class="table"><thead><tr><th>User</th><th>Source</th><th>Rows</th><th>Imported</th><th>Skipped</th><th>When</th></tr></thead><tbody>${rows}</tbody></table>`:`<div class="empty">No imports have been recorded yet.</div>`}</div></section>`}));
+});
+app.get("/admin/scoring",requireAuth,requireAdmin,async(req,res)=>{
+  const defaults={sales_weight:"24",commission_weight:"20",competition_weight:"16",visual_weight:"16",impulse_weight:"14",problem_weight:"10",priority_threshold:"80",test_threshold:"68",watch_threshold:"55"};
+  const q=await pool.query("SELECT key,value FROM app_settings WHERE key LIKE 'score.%'");const saved=Object.fromEntries(q.rows.map(r=>[r.key.replace('score.',''),r.value]));const v={...defaults,...saved};
+  res.send(shell({title:"Scoring Settings",user:req.user,active:"admin",body:`<div class="header"><div><h2>Opportunity Scoring</h2><p>Owner controls for the AffiliateLab scoring model.</p></div></div>${adminTabs("scoring")}<section class="card"><div class="cardpad"><form method="post" action="/admin/scoring"><input type="hidden" name="_csrf" value="${esc(req.user.csrf)}"><div class="grid2"><div>${[["sales_weight","Sales momentum weight"],["commission_weight","Commission weight"],["competition_weight","Competition weight"],["visual_weight","Visual demo weight"],["impulse_weight","Impulse weight"],["problem_weight","Problem/desire weight"]].map(([k,l])=>`<div class="field"><label>${l}</label><input type="number" min="0" max="100" step="1" name="${k}" value="${esc(v[k])}"></div>`).join("")}</div><div>${[["priority_threshold","PRIORITY TEST threshold"],["test_threshold","TEST threshold"],["watch_threshold","WATCH threshold"]].map(([k,l])=>`<div class="field"><label>${l}</label><input type="number" min="0" max="100" step="1" name="${k}" value="${esc(v[k])}"></div>`).join("")}<div class="flash">Changes here apply to newly scored or re-imported products. Existing historical scores are preserved until those products are scored again.</div></div></div><button class="btn primary">Save scoring settings</button></form></div></section>`}));
+});
+app.post("/admin/scoring",requireAuth,requireAdmin,requireCsrf,async(req,res)=>{
+  const keys=["sales_weight","commission_weight","competition_weight","visual_weight","impulse_weight","problem_weight","priority_threshold","test_threshold","watch_threshold"];
+  for(const k of keys){const value=String(Math.max(0,Math.min(100,Number(req.body[k]||0))));await pool.query(`INSERT INTO app_settings(key,value,updated_by,updated_at) VALUES($1,$2,$3,NOW()) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_by=EXCLUDED.updated_by,updated_at=NOW()`,[`score.${k}`,value,+req.user.sub]);SCORE_CONFIG[k]=Number(value);}
+  await audit(+req.user.sub,"scoring.settings.updated","app_settings","score","Updated scoring control values");res.redirect("/admin/scoring");
+});
+app.get("/admin/seo",requireAuth,requireAdmin,async(req,res)=>{
+  const defaults={site_title:"AffiliateLab — Creator Intelligence",meta_description:"AI-powered affiliate product research, scoring and creative operations.",marketing_domain:"",robots:"index,follow"};
+  const q=await pool.query("SELECT key,value FROM app_settings WHERE key LIKE 'seo.%'");const saved=Object.fromEntries(q.rows.map(r=>[r.key.replace('seo.',''),r.value]));const v={...defaults,...saved};
+  res.send(shell({title:"SEO / Content",user:req.user,active:"admin",body:`<div class="header"><div><h2>SEO / Content</h2><p>Private controls for the future public AffiliateLab marketing site.</p></div></div>${adminTabs("seo")}<section class="card"><div class="cardpad"><form method="post" action="/admin/seo"><input type="hidden" name="_csrf" value="${esc(req.user.csrf)}"><div class="field"><label>Site title</label><input name="site_title" value="${esc(v.site_title)}"></div><div class="field"><label>Meta description</label><textarea name="meta_description">${esc(v.meta_description)}</textarea></div><div class="field"><label>Marketing domain</label><input name="marketing_domain" placeholder="https://affiliatelab.com" value="${esc(v.marketing_domain)}"></div><div class="field"><label>Robots directive</label><select name="robots"><option ${v.robots==='index,follow'?'selected':''}>index,follow</option><option ${v.robots==='noindex,nofollow'?'selected':''}>noindex,nofollow</option></select></div><button class="btn primary">Save SEO settings</button></form><div class="flash" style="margin-top:16px">These settings are stored centrally. When we build the public marketing site/blog, it can read these values directly.</div></div></section>`}));
+});
+app.post("/admin/seo",requireAuth,requireAdmin,requireCsrf,async(req,res)=>{
+  const vals={site_title:String(req.body.site_title||"").slice(0,160),meta_description:String(req.body.meta_description||"").slice(0,320),marketing_domain:String(req.body.marketing_domain||"").slice(0,300),robots:["index,follow","noindex,nofollow"].includes(req.body.robots)?req.body.robots:"index,follow"};
+  for(const [k,value] of Object.entries(vals))await pool.query(`INSERT INTO app_settings(key,value,updated_by,updated_at) VALUES($1,$2,$3,NOW()) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_by=EXCLUDED.updated_by,updated_at=NOW()`,[`seo.${k}`,value,+req.user.sub]);
+  await audit(+req.user.sub,"seo.settings.updated","app_settings","seo",JSON.stringify(vals));res.redirect("/admin/seo");
+});
+app.get("/admin/billing",requireAuth,requireAdmin,async(req,res)=>{
+  const q=await pool.query("SELECT plan,COUNT(*)::int count FROM users GROUP BY plan ORDER BY count DESC");
+  res.send(shell({title:"Billing",user:req.user,active:"admin",body:`<div class="header"><div><h2>Billing</h2><p>Subscription operations for Creator Pro.</p></div></div>${adminTabs("billing")}<section class="stats">${q.rows.map(x=>`<div class="card stat"><div class="label">${esc(x.plan)}</div><div class="value">${x.count}</div></div>`).join("")}</section><section class="card"><div class="cardpad"><div class="kicker">Stripe next</div><h3>Creator Pro billing placeholder</h3><p>When Stripe is connected, this page should manage subscription status, trials, failed payments, credits and cancellations. No payment data is stored in AffiliateLab today.</p></div></section>`}));
+});
+app.get("/admin/settings",requireAuth,requireAdmin,async(req,res)=>{
+  const q=await pool.query("SELECT key,value,updated_at FROM app_settings ORDER BY key");
+  const rows=q.rows.map(x=>`<tr><td><code>${esc(x.key)}</code></td><td>${esc(x.value)}</td><td>${new Date(x.updated_at).toLocaleString()}</td></tr>`).join("");
+  res.send(shell({title:"Admin Settings",user:req.user,active:"admin",body:`<div class="header"><div><h2>App Settings</h2><p>Central settings registry and integration status.</p></div></div>${adminTabs("settings")}<section class="hero"><div class="card"><div class="cardpad"><b>App URL</b><p>${esc(APP_URL)}</p><b>n8n webhook</b><p>${process.env.N8N_PRODUCT_WEBHOOK?"Configured":"Not configured"}</p></div></div><div class="card"><div class="cardpad"><b>Admin bootstrap</b><p>${process.env.ADMIN_EMAIL?`ADMIN_EMAIL configured: ${esc(process.env.ADMIN_EMAIL)}`:"Oldest account is admin unless ADMIN_EMAIL is configured."}</p></div></div></section><section class="card"><div class="head">Stored settings</div><div class="tablewrap">${rows?`<table class="table"><thead><tr><th>Key</th><th>Value</th><th>Updated</th></tr></thead><tbody>${rows}</tbody></table>`:`<div class="empty">No custom settings yet.</div>`}</div></section>`}));
+});
+
 app.get("/avatar",requireAuth,(req,res)=>res.send(shell({title:"My Avatar",user:req.user,active:"avatar",body:`<div class="header"><div><h2>My Avatar</h2><p>Each creator builds and connects their own consistent AI identity.</p></div></div><section class="card"><div class="cardpad"><div class="kicker">Next module</div><h3>Avatar Identity Profile</h3><p class="muted">Store avatar name, master references, voice, platform, character ID and visual rules. AffiliateLab will use the profile whenever it generates a creative brief.</p></div></section>`})));
 app.get("/creatives",requireAuth,(req,res)=>res.send(shell({title:"Creative Studio",user:req.user,active:"creatives",body:`<div class="header"><div><h2>Creative Studio</h2><p>Turn scored products into hooks, scripts and avatar-ready briefs.</p></div></div><section class="card"><div class="empty">Creative generation is the next module.</div></section>`})));
 app.get("/settings",requireAuth,(req,res)=>res.send(shell({title:"Settings",user:req.user,active:"settings",body:`<div class="header"><div><h2>Settings</h2><p>Creator Pro account and integrations.</p></div></div><section class="card"><div class="cardpad"><b>Plan</b><p>Creator Pro — planned launch price: $49/month</p><b>n8n webhook</b><p class="muted">${process.env.N8N_PRODUCT_WEBHOOK?"Configured":"Not configured yet"}</p><b>Public app URL</b><p>${esc(APP_URL)}</p></div></section>`})));
