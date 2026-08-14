@@ -737,70 +737,219 @@ app.get("/creatives/:id",requireAuth,async(req,res)=>{
     <section class="card" style="margin-top:20px"><div class="head">Video Jobs</div><div class="tablewrap"><table><thead><tr><th>Job</th><th>Provider</th><th>Status</th><th>Output</th><th>Error</th><th></th></tr></thead><tbody>${jobs}</tbody></table></div></section>
   `}));
 });
-
-app.post("/creatives/:id/regenerate",requireAuth,requireCsrf,async(req,res)=>{
-  const uid=+req.user.sub,id=Number(req.params.id);
-  const q=await pool.query(`SELECT cp.*,p.* FROM creative_packs cp JOIN products p ON p.id=cp.product_id WHERE cp.id=$1 AND cp.user_id=$2`,[id,uid]);
-  const row=q.rows[0]; if(!row)return res.status(404).send("Creative pack not found.");
-  const aq=await pool.query("SELECT * FROM avatar_profiles WHERE user_id=$1",[uid]);
-  const pack=buildCreativePack(row,aq.rows[0]||null,{angle:row.angle,style:row.style,useAvatar:row.use_avatar});
-  await pool.query(`UPDATE creative_packs SET hooks=$1::jsonb,scripts=$2::jsonb,scenes=$3::jsonb,video_prompt=$4,provider=$5 WHERE id=$6 AND user_id=$7`,
-    [JSON.stringify(pack.hooks),JSON.stringify(pack.scripts),JSON.stringify(pack.scenes),pack.video_prompt,pack.provider,id,uid]);
-  res.redirect(`/creatives/${id}`);
-});
-
 app.post("/creatives/:id/video",requireAuth,requireCsrf,async(req,res)=>{
   const uid=+req.user.sub,id=Number(req.params.id);
-  const provider=["Higgsfield","Seedance","HeyGen"].includes(req.body.provider)?req.body.provider:"Higgsfield";
+
+  const provider=["Higgsfield","Seedance","HeyGen"].includes(req.body.provider)
+    ? req.body.provider
+    : "Higgsfield";
+
   const webhook=String(process.env.N8N_VIDEO_WEBHOOK||"").trim();
-  if(!webhook)return res.status(503).send("Video connector is not configured. Add N8N_VIDEO_WEBHOOK.");
+
+  if(!webhook){
+    return res.status(503).send(
+      "Video connector is not configured. Add N8N_VIDEO_WEBHOOK."
+    );
+  }
+
   const [cq,aq]=await Promise.all([
-    pool.query(`SELECT cp.*,p.name AS product_name,p.product_url,p.category,p.price,p.commission_percent
-      FROM creative_packs cp JOIN products p ON p.id=cp.product_id WHERE cp.id=$1 AND cp.user_id=$2`,[id,uid]),
-    pool.query("SELECT * FROM avatar_profiles WHERE user_id=$1",[uid])
+    pool.query(
+      `SELECT cp.*,p.name AS product_name,p.product_url,p.category,p.price,p.commission_percent
+       FROM creative_packs cp
+       JOIN products p ON p.id=cp.product_id
+       WHERE cp.id=$1 AND cp.user_id=$2`,
+      [id,uid]
+    ),
+    pool.query(
+      "SELECT * FROM avatar_profiles WHERE user_id=$1",
+      [uid]
+    )
   ]);
-  const c=cq.rows[0]; if(!c)return res.status(404).send("Creative pack not found.");
+
+  const c=cq.rows[0];
+
+  if(!c){
+    return res.status(404).send("Creative pack not found.");
+  }
+
   const avatar=aq.rows[0]||null;
+
   const payload={
     event:"video.generate",
     creative_pack_id:c.id,
     user_id:uid,
     provider,
-    product:{name:c.product_name,url:c.product_url,category:c.category,price:c.price,commission_percent:c.commission_percent},
-    creative:{angle:c.angle,style:c.style,use_avatar:c.use_avatar,hooks:c.hooks,scripts:c.scripts,scenes:c.scenes,video_prompt:c.video_prompt},
-    avatar:c.use_avatar&&avatar?{
-      name:avatar.avatar_name,presentation:avatar.presentation,age_range:avatar.age_range,visual_description:avatar.visual_description,
-      hair_skin_clothing:avatar.hair_skin_clothing,voice_tone:avatar.voice_tone,accent:avatar.accent,target_audience:avatar.target_audience,
-      niche:avatar.niche,video_style:avatar.video_style,generator:avatar.generator,character_id:avatar.character_id,
-      reference_urls:String(avatar.reference_urls||"").split(/\r?\n/).filter(Boolean),character_lock_prompt:avatar.character_lock_prompt
-    }:null,
-    callback_url:`${APP_URL}/api/video-jobs/CALLBACK_ID/callback`
-  };
-  const iq = await pool.query(
-  `INSERT INTO video_jobs(user_id,creative_pack_id,provider,status,request_payload)
-   VALUES($1,$2,$3,'queued',$4::jsonb)
-   RETURNING id`,
-  [uid,id,provider,JSON.stringify(payload)]
-const jobId = iq.rows[0].id;
-payload.video_job_id = jobId;
-payload.callback_url = `${APP_URL}/api/video-jobs/${jobId}/callback`;
 
-const secret = String(process.env.VIDEO_CALLBACK_SECRET || "").trim();
-const headers = {"content-type":"application/json"};
-if(secret) headers["x-affiliatelab-secret"] = secret;
-  try{
-    const r=await fetch(webhook,{method:"POST",headers,body:JSON.stringify(payload),signal:AbortSignal.timeout(15000)});
-    
-    }else{
-      const ext=String(body.job_id||body.id||body.external_job_id||"").slice(0,500);
-      const status=String(body.status||"submitted").toLowerCase();
-      const videoUrl=String(body.video_url||body.url||"").slice(0,5000);
-      await pool.query("UPDATE video_jobs SET status=$1,external_job_id=$2,response_payload=$3::jsonb,video_url=$4,updated_at=NOW() WHERE id=$5",
-        [videoUrl?"completed":status,ext,JSON.stringify(body),videoUrl,jobId]);
-    }
-  }catch(e){
-    await pool.query("UPDATE video_jobs SET status='failed',error_message=$1,updated_at=NOW() WHERE id=$2",[String(e.message||e).slice(0,3000),jobId]);
+    product:{
+      name:c.product_name,
+      url:c.product_url,
+      category:c.category,
+      price:c.price,
+      commission_percent:c.commission_percent
+    },
+
+    creative:{
+      angle:c.angle,
+      style:c.style,
+      use_avatar:c.use_avatar,
+      hooks:c.hooks,
+      scripts:c.scripts,
+      scenes:c.scenes,
+      video_prompt:c.video_prompt
+    },
+
+    avatar:c.use_avatar&&avatar ? {
+      name:avatar.avatar_name,
+      presentation:avatar.presentation,
+      age_range:avatar.age_range,
+      visual_description:avatar.visual_description,
+      hair_skin_clothing:avatar.hair_skin_clothing,
+      voice_tone:avatar.voice_tone,
+      accent:avatar.accent,
+      target_audience:avatar.target_audience,
+      niche:avatar.niche,
+      video_style:avatar.video_style,
+      generator:avatar.generator,
+      character_id:avatar.character_id,
+      reference_urls:String(avatar.reference_urls||"")
+        .split(/\r?\n/)
+        .filter(Boolean),
+      character_lock_prompt:avatar.character_lock_prompt
+    } : null
+  };
+
+  const iq=await pool.query(
+    `INSERT INTO video_jobs(
+      user_id,
+      creative_pack_id,
+      provider,
+      status,
+      request_payload
+    )
+    VALUES($1,$2,$3,'queued',$4::jsonb)
+    RETURNING id`,
+    [
+      uid,
+      id,
+      provider,
+      JSON.stringify(payload)
+    ]
+  );
+
+  const jobId=iq.rows[0].id;
+
+  payload.video_job_id=jobId;
+  payload.callback_url=
+    `${APP_URL}/api/video-jobs/${jobId}/callback`;
+
+  const secret=String(
+    process.env.VIDEO_CALLBACK_SECRET||""
+  ).trim();
+
+  const headers={
+    "content-type":"application/json"
+  };
+
+  if(secret){
+    headers["x-affiliatelab-secret"]=secret;
   }
+
+  try{
+
+    const r=await fetch(
+      webhook,
+      {
+        method:"POST",
+        headers,
+        body:JSON.stringify(payload),
+        signal:AbortSignal.timeout(15000)
+      }
+    );
+
+    const text=await r.text();
+
+    let body={};
+
+    try{
+      body=text ? JSON.parse(text) : {};
+    }catch{
+      body={
+        raw:text.slice(0,5000)
+      };
+    }
+
+    if(!r.ok){
+
+      await pool.query(
+        `UPDATE video_jobs
+         SET
+           status='failed',
+           response_payload=$1::jsonb,
+           error_message=$2,
+           updated_at=NOW()
+         WHERE id=$3`,
+        [
+          JSON.stringify(body),
+          `Connector HTTP ${r.status}`,
+          jobId
+        ]
+      );
+
+    }else{
+
+      const ext=String(
+        body.request_id ||
+        body.job_id ||
+        body.id ||
+        body.external_job_id ||
+        ""
+      ).slice(0,500);
+
+      const status=String(
+        body.status || "submitted"
+      ).toLowerCase();
+
+      const videoUrl=String(
+        body.video_url ||
+        body.url ||
+        ""
+      ).slice(0,5000);
+
+      await pool.query(
+        `UPDATE video_jobs
+         SET
+           status=$1,
+           external_job_id=$2,
+           response_payload=$3::jsonb,
+           video_url=$4,
+           updated_at=NOW()
+         WHERE id=$5`,
+        [
+          videoUrl ? "completed" : status,
+          ext,
+          JSON.stringify(body),
+          videoUrl,
+          jobId
+        ]
+      );
+    }
+
+  }catch(e){
+
+    await pool.query(
+      `UPDATE video_jobs
+       SET
+         status='failed',
+         error_message=$1,
+         updated_at=NOW()
+       WHERE id=$2`,
+      [
+        String(e.message||e).slice(0,3000),
+        jobId
+      ]
+    );
+  }
+
   res.redirect(`/video-jobs/${jobId}`);
 });
 
