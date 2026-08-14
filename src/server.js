@@ -243,6 +243,23 @@ async function migrate(){
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   );
   CREATE INDEX IF NOT EXISTS creative_packs_user_created_idx ON creative_packs(user_id,created_at DESC);
+  CREATE TABLE IF NOT EXISTS video_jobs(
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    creative_pack_id BIGINT NOT NULL REFERENCES creative_packs(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL DEFAULT 'Higgsfield',
+    status TEXT NOT NULL DEFAULT 'queued',
+    external_job_id TEXT NOT NULL DEFAULT '',
+    request_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    response_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    video_url TEXT NOT NULL DEFAULT '',
+    thumbnail_url TEXT NOT NULL DEFAULT '',
+    error_message TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  CREATE INDEX IF NOT EXISTS video_jobs_user_created_idx ON video_jobs(user_id,created_at DESC);
+  CREATE INDEX IF NOT EXISTS video_jobs_pack_idx ON video_jobs(creative_pack_id);
   `);
   const adminEmail=String(process.env.ADMIN_EMAIL||"").trim().toLowerCase();
   if(adminEmail) await pool.query("UPDATE users SET role='admin' WHERE lower(email)=$1",[adminEmail]);
@@ -681,20 +698,142 @@ app.post("/creatives/generate",requireAuth,requireCsrf,async(req,res)=>{
 app.get("/creatives/:id",requireAuth,async(req,res)=>{
   const uid=+req.user.sub,id=Number(req.params.id);
   if(!Number.isInteger(id))return res.status(404).send("Not found.");
-  const q=await pool.query(`SELECT cp.*,p.name AS product_name,p.affiliate_score,p.category,p.price,p.commission_percent
-    FROM creative_packs cp JOIN products p ON p.id=cp.product_id WHERE cp.id=$1 AND cp.user_id=$2`,[id,uid]);
+  const [q,jq]=await Promise.all([
+    pool.query(`SELECT cp.*,p.name AS product_name,p.affiliate_score,p.category,p.price,p.commission_percent
+      FROM creative_packs cp JOIN products p ON p.id=cp.product_id WHERE cp.id=$1 AND cp.user_id=$2`,[id,uid]),
+    pool.query(`SELECT * FROM video_jobs WHERE creative_pack_id=$1 AND user_id=$2 ORDER BY created_at DESC LIMIT 10`,[id,uid])
+  ]);
   const c=q.rows[0]; if(!c)return res.status(404).send("Creative pack not found.");
   const hooks=Array.isArray(c.hooks)?c.hooks:JSON.parse(c.hooks||"[]");
   const scripts=Array.isArray(c.scripts)?c.scripts:JSON.parse(c.scripts||"[]");
   const scenes=Array.isArray(c.scenes)?c.scenes:JSON.parse(c.scenes||"[]");
+  const copyBtn=(label,target)=>`<button class="btn" type="button" onclick="copyText('${target}',this)">${label}</button>`;
+  const jobs=jq.rows.length?jq.rows.map(j=>`<tr><td>#${j.id}</td><td>${esc(j.provider)}</td><td><span class="pill ${j.status==="completed"?"winner":j.status==="failed"?"testing":"new"}">${esc(j.status)}</span></td><td>${j.video_url?`<a href="${esc(j.video_url)}" target="_blank" rel="noopener">Open video</a>`:"—"}</td><td>${j.error_message?esc(j.error_message):"—"}</td><td><a href="/video-jobs/${j.id}" class="btn">View</a></td></tr>`).join(""):`<tr><td colspan="6" class="muted">No video jobs yet.</td></tr>`;
   res.send(shell({title:"Creative Pack",user:req.user,active:"creatives",body:`
-    <div class="header"><div><div class="kicker">${esc(creativeAngleLabel(c.angle))}</div><h2>${esc(c.product_name)} Creative Pack</h2><p>${esc(creativeStyleLabel(c.style))} · ${c.use_avatar?"My Avatar":"No avatar"} · ${esc(c.provider||"")}</p></div><div class="actions"><a class="btn" href="/creatives">New Pack</a></div></div>
-    <section class="card"><div class="head">5 Hooks</div><div class="cardpad">${hooks.map((h,i)=>`<div class="card" style="margin-bottom:10px"><div class="cardpad"><div class="kicker">Hook ${i+1}</div><b>${esc(h)}</b></div></div>`).join("")}</div></section>
+    <script>
+      async function copyText(id,btn){
+        const el=document.getElementById(id); if(!el)return;
+        const text=("value" in el)?el.value:el.innerText;
+        try{await navigator.clipboard.writeText(text);const old=btn.textContent;btn.textContent="Copied ✓";setTimeout(()=>btn.textContent=old,1200);}
+        catch(e){window.prompt("Copy this text:",text);}
+      }
+    </script>
+    <div class="header"><div><div class="kicker">${esc(creativeAngleLabel(c.angle))}</div><h2>${esc(c.product_name)} Creative Pack</h2><p>${esc(creativeStyleLabel(c.style))} · ${c.use_avatar?"My Avatar":"No avatar"} · ${esc(c.provider||"")}</p></div><div class="actions"><a class="btn" href="/creatives">New Pack</a><form method="post" action="/creatives/${c.id}/regenerate" style="display:inline"><input type="hidden" name="_csrf" value="${esc(req.user.csrf)}"><button class="btn">Regenerate</button></form></div></div>
+    <section class="card"><div class="head">5 Hooks <span style="float:right">${copyBtn("Copy all hooks","hooks-all")}</span></div><div class="cardpad"><div id="hooks-all" style="display:none">${hooks.map((h,i)=>`${i+1}. ${esc(h)}`).join("\n")}</div>${hooks.map((h,i)=>`<div class="card" style="margin-bottom:10px"><div class="cardpad"><div class="actions" style="justify-content:space-between"><div class="kicker">Hook ${i+1}</div>${copyBtn("Copy",`hook-${i}`)}</div><b id="hook-${i}">${esc(h)}</b></div></div>`).join("")}</div></section>
     <div class="header" style="margin-top:20px"><div><h3>Scripts</h3><p>Three lengths for rapid testing.</p></div></div>
-    <section class="hero">${scripts.map(s=>`<div class="card"><div class="cardpad"><div class="kicker">${esc(s.label)}</div><p>${esc(s.text)}</p></div></div>`).join("")}</section>
+    <section class="hero">${scripts.map((s,i)=>`<div class="card"><div class="cardpad"><div class="actions" style="justify-content:space-between"><div class="kicker">${esc(s.label)}</div>${copyBtn("Copy",`script-${i}`)}</div><p id="script-${i}">${esc(s.text)}</p></div></div>`).join("")}</section>
     <section class="card" style="margin-top:20px"><div class="head">Scene Breakdown</div><div class="tablewrap"><table><thead><tr><th>Scene</th><th>Time</th><th>Shot</th><th>Direction</th></tr></thead><tbody>${scenes.map(s=>`<tr><td>${s.scene}</td><td>${esc(s.time)}</td><td>${esc(s.shot)}</td><td>${esc(s.direction)}</td></tr>`).join("")}</tbody></table></div></section>
-    <section class="card" style="margin-top:20px"><div class="head">${esc(c.provider||"Video")} Prompt</div><div class="cardpad"><textarea style="min-height:320px" readonly>${esc(c.video_prompt)}</textarea><p class="muted">This is provider-ready prompt text. Direct API submission comes in the connector phase.</p></div></section>
+    <section class="card" style="margin-top:20px"><div class="head">${esc(c.provider||"Video")} Prompt <span style="float:right">${copyBtn("Copy prompt","video-prompt")}</span></div><div class="cardpad"><textarea id="video-prompt" style="min-height:320px" readonly>${esc(c.video_prompt)}</textarea><p class="muted">This prompt can now be submitted to the video connector below.</p></div></section>
+    <section class="card" style="margin-top:20px"><div class="head">Generate Video</div><div class="cardpad">
+      <form method="post" action="/creatives/${c.id}/video"><input type="hidden" name="_csrf" value="${esc(req.user.csrf)}">
+        <div class="grid2">
+          <div class="field"><label>Provider</label><select name="provider"><option>Higgsfield</option><option>Seedance</option><option>HeyGen</option></select></div>
+          <div class="field"><label>Delivery</label><input value="${process.env.N8N_VIDEO_WEBHOOK?"n8n connector configured":"n8n connector not configured"}" disabled></div>
+        </div>
+        <div class="actions"><button class="btn primary" ${process.env.N8N_VIDEO_WEBHOOK?"":"disabled"}>Generate Video</button><a class="btn" href="/settings">Connector Settings</a></div>
+        ${process.env.N8N_VIDEO_WEBHOOK?"":`<p class="muted">Add <code>N8N_VIDEO_WEBHOOK</code> to the AffiliateLab app environment variables before video submission is enabled.</p>`}
+      </form>
+    </div></section>
+    <section class="card" style="margin-top:20px"><div class="head">Video Jobs</div><div class="tablewrap"><table><thead><tr><th>Job</th><th>Provider</th><th>Status</th><th>Output</th><th>Error</th><th></th></tr></thead><tbody>${jobs}</tbody></table></div></section>
   `}));
+});
+
+app.post("/creatives/:id/regenerate",requireAuth,requireCsrf,async(req,res)=>{
+  const uid=+req.user.sub,id=Number(req.params.id);
+  const q=await pool.query(`SELECT cp.*,p.* FROM creative_packs cp JOIN products p ON p.id=cp.product_id WHERE cp.id=$1 AND cp.user_id=$2`,[id,uid]);
+  const row=q.rows[0]; if(!row)return res.status(404).send("Creative pack not found.");
+  const aq=await pool.query("SELECT * FROM avatar_profiles WHERE user_id=$1",[uid]);
+  const pack=buildCreativePack(row,aq.rows[0]||null,{angle:row.angle,style:row.style,useAvatar:row.use_avatar});
+  await pool.query(`UPDATE creative_packs SET hooks=$1::jsonb,scripts=$2::jsonb,scenes=$3::jsonb,video_prompt=$4,provider=$5 WHERE id=$6 AND user_id=$7`,
+    [JSON.stringify(pack.hooks),JSON.stringify(pack.scripts),JSON.stringify(pack.scenes),pack.video_prompt,pack.provider,id,uid]);
+  res.redirect(`/creatives/${id}`);
+});
+
+app.post("/creatives/:id/video",requireAuth,requireCsrf,async(req,res)=>{
+  const uid=+req.user.sub,id=Number(req.params.id);
+  const provider=["Higgsfield","Seedance","HeyGen"].includes(req.body.provider)?req.body.provider:"Higgsfield";
+  const webhook=String(process.env.N8N_VIDEO_WEBHOOK||"").trim();
+  if(!webhook)return res.status(503).send("Video connector is not configured. Add N8N_VIDEO_WEBHOOK.");
+  const [cq,aq]=await Promise.all([
+    pool.query(`SELECT cp.*,p.name AS product_name,p.product_url,p.category,p.price,p.commission_percent
+      FROM creative_packs cp JOIN products p ON p.id=cp.product_id WHERE cp.id=$1 AND cp.user_id=$2`,[id,uid]),
+    pool.query("SELECT * FROM avatar_profiles WHERE user_id=$1",[uid])
+  ]);
+  const c=cq.rows[0]; if(!c)return res.status(404).send("Creative pack not found.");
+  const avatar=aq.rows[0]||null;
+  const payload={
+    event:"video.generate",
+    creative_pack_id:c.id,
+    user_id:uid,
+    provider,
+    product:{name:c.product_name,url:c.product_url,category:c.category,price:c.price,commission_percent:c.commission_percent},
+    creative:{angle:c.angle,style:c.style,use_avatar:c.use_avatar,hooks:c.hooks,scripts:c.scripts,scenes:c.scenes,video_prompt:c.video_prompt},
+    avatar:c.use_avatar&&avatar?{
+      name:avatar.avatar_name,presentation:avatar.presentation,age_range:avatar.age_range,visual_description:avatar.visual_description,
+      hair_skin_clothing:avatar.hair_skin_clothing,voice_tone:avatar.voice_tone,accent:avatar.accent,target_audience:avatar.target_audience,
+      niche:avatar.niche,video_style:avatar.video_style,generator:avatar.generator,character_id:avatar.character_id,
+      reference_urls:String(avatar.reference_urls||"").split(/\r?\n/).filter(Boolean),character_lock_prompt:avatar.character_lock_prompt
+    }:null,
+    callback_url:`${APP_URL}/api/video-jobs/CALLBACK_ID/callback`
+  };
+  const iq=await pool.query(`INSERT INTO video_jobs(user_id,creative_pack_id,provider,status,request_payload) VALUES($1,$2,$3,'queued',$4::jsonb) RETURNING id`,
+    [uid,id,provider,JSON.stringify(payload)]);
+  const jobId=iq.rows[0].id;
+  payload.video_job_id=jobId;
+  payload.callback_url=`${APP_URL}/api/video-jobs/${jobId}/callback`;
+  const secret=String(process.env.VIDEO_CALLBACK_SECRET||"").trim();
+  const headers={"content-type":"application/json"};
+  if(secret)headers["x-affiliatelab-secret"]=secret;
+  try{
+    const r=await fetch(webhook,{method:"POST",headers,body:JSON.stringify(payload),signal:AbortSignal.timeout(15000)});
+    const text=await r.text();
+    let body={}; try{body=text?JSON.parse(text):{}}catch{body={raw:text.slice(0,5000)}}
+    if(!r.ok){
+      await pool.query("UPDATE video_jobs SET status='failed',response_payload=$1::jsonb,error_message=$2,updated_at=NOW() WHERE id=$3",[JSON.stringify(body),`Connector HTTP ${r.status}`,jobId]);
+    }else{
+      const ext=String(body.job_id||body.id||body.external_job_id||"").slice(0,500);
+      const status=String(body.status||"submitted").toLowerCase();
+      const videoUrl=String(body.video_url||body.url||"").slice(0,5000);
+      await pool.query("UPDATE video_jobs SET status=$1,external_job_id=$2,response_payload=$3::jsonb,video_url=$4,updated_at=NOW() WHERE id=$5",
+        [videoUrl?"completed":status,ext,JSON.stringify(body),videoUrl,jobId]);
+    }
+  }catch(e){
+    await pool.query("UPDATE video_jobs SET status='failed',error_message=$1,updated_at=NOW() WHERE id=$2",[String(e.message||e).slice(0,3000),jobId]);
+  }
+  res.redirect(`/video-jobs/${jobId}`);
+});
+
+app.get("/video-jobs/:id",requireAuth,async(req,res)=>{
+  const uid=+req.user.sub,id=Number(req.params.id);
+  const q=await pool.query(`SELECT vj.*,cp.video_prompt,p.name AS product_name
+    FROM video_jobs vj JOIN creative_packs cp ON cp.id=vj.creative_pack_id JOIN products p ON p.id=cp.product_id
+    WHERE vj.id=$1 AND vj.user_id=$2`,[id,uid]);
+  const j=q.rows[0]; if(!j)return res.status(404).send("Video job not found.");
+  res.send(shell({title:"Video Job",user:req.user,active:"creatives",body:`
+    <div class="header"><div><div class="kicker">Video Job #${j.id}</div><h2>${esc(j.product_name)}</h2><p>${esc(j.provider)} · ${esc(j.status)}</p></div><div class="actions"><a class="btn" href="/creatives/${j.creative_pack_id}">Back to Creative Pack</a></div></div>
+    <section class="hero"><div class="card"><div class="cardpad"><div class="kicker">Status</div><h3>${esc(j.status)}</h3><p class="muted">${j.external_job_id?`External job: ${esc(j.external_job_id)}`:"Waiting for provider job ID."}</p></div></div>
+    <div class="card"><div class="cardpad"><div class="kicker">Provider</div><h3>${esc(j.provider)}</h3><p class="muted">Created ${new Date(j.created_at).toLocaleString()}</p></div></div></section>
+    ${j.video_url?`<section class="card" style="margin-top:20px"><div class="head">Finished Video</div><div class="cardpad"><video controls style="width:100%;max-width:520px;border-radius:12px" src="${esc(j.video_url)}"></video><div class="actions" style="margin-top:12px"><a class="btn primary" target="_blank" rel="noopener" href="${esc(j.video_url)}">Open Video</a></div></div></section>`:""}
+    ${j.error_message?`<section class="card" style="margin-top:20px"><div class="head">Error</div><div class="cardpad"><p>${esc(j.error_message)}</p></div></section>`:""}
+    <script>setTimeout(()=>{if(${JSON.stringify(!["completed","failed"].includes(j.status))})location.reload()},10000)</script>
+  `}));
+});
+
+app.post("/api/video-jobs/:id/callback",express.json({limit:"2mb"}),async(req,res)=>{
+  const id=Number(req.params.id); if(!Number.isInteger(id))return res.status(400).json({ok:false});
+  const expected=String(process.env.VIDEO_CALLBACK_SECRET||"").trim();
+  if(expected && req.get("x-affiliatelab-secret")!==expected)return res.status(401).json({ok:false,error:"unauthorized"});
+  const q=await pool.query("SELECT id FROM video_jobs WHERE id=$1",[id]); if(!q.rows[0])return res.status(404).json({ok:false});
+  const status=String(req.body.status||"").toLowerCase();
+  const normalized=["queued","submitted","processing","completed","failed"].includes(status)?status:"processing";
+  const videoUrl=String(req.body.video_url||req.body.url||"").trim().slice(0,5000);
+  const thumb=String(req.body.thumbnail_url||"").trim().slice(0,5000);
+  const ext=String(req.body.job_id||req.body.external_job_id||"").trim().slice(0,500);
+  const err=String(req.body.error||req.body.error_message||"").trim().slice(0,3000);
+  await pool.query(`UPDATE video_jobs SET status=$1,video_url=$2,thumbnail_url=$3,external_job_id=CASE WHEN $4<>'' THEN $4 ELSE external_job_id END,
+    error_message=$5,response_payload=$6::jsonb,updated_at=NOW() WHERE id=$7`,
+    [videoUrl?"completed":normalized,videoUrl,thumb,ext,err,JSON.stringify(req.body||{}),id]);
+  res.json({ok:true,video_job_id:id});
 });
 app.get("/settings",requireAuth,(req,res)=>res.send(shell({title:"Settings",user:req.user,active:"settings",body:`<div class="header"><div><h2>Settings</h2><p>Creator Pro account and integrations.</p></div></div><section class="card"><div class="cardpad"><b>Plan</b><p>Creator Pro — planned launch price: $49/month</p><b>n8n webhook</b><p class="muted">${process.env.N8N_PRODUCT_WEBHOOK?"Configured":"Not configured yet"}</p><b>Public app URL</b><p>${esc(APP_URL)}</p></div></section>`})));
 
