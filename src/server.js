@@ -205,6 +205,29 @@ async function migrate(){
     details TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   );
+  CREATE TABLE IF NOT EXISTS avatar_profiles(
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    avatar_name TEXT NOT NULL DEFAULT '',
+    presentation TEXT NOT NULL DEFAULT '',
+    age_range TEXT NOT NULL DEFAULT '',
+    visual_description TEXT NOT NULL DEFAULT '',
+    hair_skin_clothing TEXT NOT NULL DEFAULT '',
+    voice_tone TEXT NOT NULL DEFAULT '',
+    accent TEXT NOT NULL DEFAULT '',
+    target_audience TEXT NOT NULL DEFAULT '',
+    niche TEXT NOT NULL DEFAULT '',
+    video_style TEXT NOT NULL DEFAULT '',
+    generator TEXT NOT NULL DEFAULT 'Higgsfield',
+    character_id TEXT NOT NULL DEFAULT '',
+    reference_urls TEXT NOT NULL DEFAULT '',
+    phrases_use TEXT NOT NULL DEFAULT '',
+    phrases_avoid TEXT NOT NULL DEFAULT '',
+    brand_rules TEXT NOT NULL DEFAULT '',
+    character_lock_prompt TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
   `);
   const adminEmail=String(process.env.ADMIN_EMAIL||"").trim().toLowerCase();
   if(adminEmail) await pool.query("UPDATE users SET role='admin' WHERE lower(email)=$1",[adminEmail]);
@@ -426,7 +449,97 @@ app.get("/admin/settings",requireAuth,requireAdmin,async(req,res)=>{
   res.send(shell({title:"Admin Settings",user:req.user,active:"admin",body:`<div class="header"><div><h2>App Settings</h2><p>Central settings registry and integration status.</p></div></div>${adminTabs("settings")}<section class="hero"><div class="card"><div class="cardpad"><b>App URL</b><p>${esc(APP_URL)}</p><b>n8n webhook</b><p>${process.env.N8N_PRODUCT_WEBHOOK?"Configured":"Not configured"}</p></div></div><div class="card"><div class="cardpad"><b>Admin bootstrap</b><p>${process.env.ADMIN_EMAIL?`ADMIN_EMAIL configured: ${esc(process.env.ADMIN_EMAIL)}`:"Oldest account is admin unless ADMIN_EMAIL is configured."}</p></div></div></section><section class="card"><div class="head">Stored settings</div><div class="tablewrap">${rows?`<table class="table"><thead><tr><th>Key</th><th>Value</th><th>Updated</th></tr></thead><tbody>${rows}</tbody></table>`:`<div class="empty">No custom settings yet.</div>`}</div></section>`}));
 });
 
-app.get("/avatar",requireAuth,(req,res)=>res.send(shell({title:"My Avatar",user:req.user,active:"avatar",body:`<div class="header"><div><h2>My Avatar</h2><p>Each creator builds and connects their own consistent AI identity.</p></div></div><section class="card"><div class="cardpad"><div class="kicker">Next module</div><h3>Avatar Identity Profile</h3><p class="muted">Store avatar name, master references, voice, platform, character ID and visual rules. AffiliateLab will use the profile whenever it generates a creative brief.</p></div></section>`})));
+function avatarLockPrompt(a){
+  const parts=[
+    a.avatar_name?`Character name: ${a.avatar_name}.`:"",
+    a.presentation?`Presentation: ${a.presentation}.`:"",
+    a.age_range?`Apparent age range: ${a.age_range}.`:"",
+    a.visual_description?`Core appearance: ${a.visual_description}`:"",
+    a.hair_skin_clothing?`Hair, skin and wardrobe continuity: ${a.hair_skin_clothing}`:"",
+    a.voice_tone?`Voice and personality: ${a.voice_tone}`:"",
+    a.accent?`Accent/speech style: ${a.accent}.`:"",
+    a.niche?`Creator niche: ${a.niche}.`:"",
+    a.target_audience?`Primary audience: ${a.target_audience}`:"",
+    a.video_style?`Default video style: ${a.video_style}`:"",
+    a.brand_rules?`Brand safety / continuity rules: ${a.brand_rules}`:"",
+    a.phrases_use?`Preferred language: ${a.phrases_use}`:"",
+    a.phrases_avoid?`Avoid: ${a.phrases_avoid}`:"",
+    "Keep the same face, approximate age, hair, skin tone, body proportions, wardrobe logic, voice personality and overall identity across every scene. Do not randomly change identity-defining features."
+  ].filter(Boolean);
+  return parts.join(" ");
+}
+
+app.get("/avatar",requireAuth,async(req,res)=>{
+  const q=await pool.query("SELECT * FROM avatar_profiles WHERE user_id=$1",[+req.user.sub]);
+  const a=q.rows[0]||{};
+  const filled=["avatar_name","visual_description","voice_tone","target_audience","niche","video_style"].filter(k=>String(a[k]||"").trim()).length;
+  const completeness=Math.round(filled/6*100);
+  const refs=String(a.reference_urls||"").split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+  const refCards=refs.slice(0,3).map((u,i)=>`<div class="card"><div class="cardpad"><div class="kicker">Reference ${i+1}</div><img src="${esc(u)}" alt="Avatar reference ${i+1}" style="width:100%;max-height:260px;object-fit:cover;border-radius:12px;margin-top:10px"><p class="muted" style="word-break:break-all">${esc(u)}</p></div></div>`).join("");
+  res.send(shell({title:"My Avatar",user:req.user,active:"avatar",body:`
+  <div class="header"><div><div class="kicker">Creator Identity</div><h2>My Avatar</h2><p>Build one persistent AI identity and reuse it across every product, script and video brief.</p></div><div class="actions"><span class="pill ${completeness>=80?"winner":completeness>=50?"testing":"new"}">${completeness}% complete</span></div></div>
+  <section class="hero"><div class="card"><div class="cardpad"><div class="kicker">Identity lock</div><h3>${esc(a.avatar_name||"Create your avatar")}</h3><p>${a.visual_description?esc(a.visual_description):"Define the face, style, voice and audience once. AffiliateLab will carry those rules into future creative generation."}</p><div class="actions"><span class="pill new">${esc(a.generator||"Higgsfield")}</span>${a.character_id?`<span class="pill testing">Character ID saved</span>`:""}</div></div></div><div class="card"><div class="cardpad"><div class="kicker">How this will be used</div><h3>Product → Script → Avatar → Video</h3><p class="muted">Creative Studio will combine a winning product with this identity profile so hooks and scene prompts stay on-brand and visually consistent.</p></div></div></section>
+  <section class="card"><div class="head">Avatar Identity Profile</div><div class="cardpad"><form method="post" action="/avatar"><input type="hidden" name="_csrf" value="${esc(req.user.csrf)}">
+  <div class="grid2">
+    <div>
+      <div class="field"><label>Avatar name</label><input name="avatar_name" maxlength="100" placeholder="e.g. Maya" value="${esc(a.avatar_name||"")}"></div>
+      <div class="field"><label>Presentation</label><select name="presentation"><option value="">Choose...</option>${["Female","Male","Androgynous / neutral","Custom"].map(x=>`<option ${a.presentation===x?"selected":""}>${x}</option>`).join("")}</select></div>
+      <div class="field"><label>Age range</label><input name="age_range" maxlength="80" placeholder="e.g. 28–35" value="${esc(a.age_range||"")}"></div>
+      <div class="field"><label>Core visual description</label><textarea name="visual_description" maxlength="2000" placeholder="Face, build, distinguishing features, overall look...">${esc(a.visual_description||"")}</textarea></div>
+      <div class="field"><label>Hair / skin / clothing continuity</label><textarea name="hair_skin_clothing" maxlength="2000" placeholder="Hair style/color, skin tone, wardrobe rules, accessories...">${esc(a.hair_skin_clothing||"")}</textarea></div>
+      <div class="field"><label>Reference image URLs</label><textarea name="reference_urls" maxlength="6000" placeholder="One HTTPS image URL per line, up to 3 references">${esc(a.reference_urls||"")}</textarea><div class="muted">For V1, paste image URLs. Direct file upload/storage can be added when we connect the video providers.</div></div>
+    </div>
+    <div>
+      <div class="field"><label>Voice / personality</label><textarea name="voice_tone" maxlength="2000" placeholder="Warm, confident, conversational, energetic, expert...">${esc(a.voice_tone||"")}</textarea></div>
+      <div class="field"><label>Accent / speech style</label><input name="accent" maxlength="200" placeholder="e.g. neutral North American, relaxed pace" value="${esc(a.accent||"")}"></div>
+      <div class="field"><label>Target audience</label><textarea name="target_audience" maxlength="1500" placeholder="Who this avatar speaks to...">${esc(a.target_audience||"")}</textarea></div>
+      <div class="field"><label>Content niche</label><input name="niche" maxlength="200" placeholder="e.g. beauty, hair care, wellness" value="${esc(a.niche||"")}"></div>
+      <div class="field"><label>Preferred video style</label><input name="video_style" maxlength="500" placeholder="e.g. direct-to-camera UGC, bathroom demo, testimonial" value="${esc(a.video_style||"")}"></div>
+      <div class="field"><label>Preferred generator</label><select name="generator">${["Higgsfield","Seedance","HeyGen","Other / manual"].map(x=>`<option ${String(a.generator||"Higgsfield")===x?"selected":""}>${x}</option>`).join("")}</select></div>
+      <div class="field"><label>Provider character / avatar ID</label><input name="character_id" maxlength="500" placeholder="Optional ID from Higgsfield / HeyGen / another provider" value="${esc(a.character_id||"")}"></div>
+    </div>
+  </div>
+  <div class="grid2">
+    <div><div class="field"><label>Phrases / language to use</label><textarea name="phrases_use" maxlength="2000" placeholder="Preferred phrases, vocabulary, CTA style...">${esc(a.phrases_use||"")}</textarea></div></div>
+    <div><div class="field"><label>Phrases / claims to avoid</label><textarea name="phrases_avoid" maxlength="2000" placeholder="Claims, words or tones this creator should never use...">${esc(a.phrases_avoid||"")}</textarea></div></div>
+  </div>
+  <div class="field"><label>Brand-safe / continuity rules</label><textarea name="brand_rules" maxlength="3000" placeholder="Always/never rules for the character, product presentation and brand safety...">${esc(a.brand_rules||"")}</textarea></div>
+  <div class="field"><label>Character Lock Prompt</label><textarea name="character_lock_prompt" maxlength="7000" placeholder="AffiliateLab can generate this automatically from the fields above. You can also customize it.">${esc(a.character_lock_prompt||avatarLockPrompt(a))}</textarea><div class="muted">This becomes the reusable identity block Creative Studio can attach to future image/video prompts.</div></div>
+  <div class="actions"><button class="btn primary">Save Avatar</button><a class="btn" href="/creatives">Open Creative Studio</a></div>
+  </form></div></section>
+  ${refCards?`<div class="header" style="margin-top:22px"><div><h3>Master References</h3><p>Visual references currently attached to this identity.</p></div></div><section class="hero">${refCards}</section>`:""}
+  `}));
+});
+
+app.post("/avatar",requireAuth,requireCsrf,async(req,res)=>{
+  const uid=+req.user.sub;
+  const allowedGenerators=["Higgsfield","Seedance","HeyGen","Other / manual"];
+  const a={
+    avatar_name:String(req.body.avatar_name||"").trim().slice(0,100),
+    presentation:String(req.body.presentation||"").trim().slice(0,100),
+    age_range:String(req.body.age_range||"").trim().slice(0,80),
+    visual_description:String(req.body.visual_description||"").trim().slice(0,2000),
+    hair_skin_clothing:String(req.body.hair_skin_clothing||"").trim().slice(0,2000),
+    voice_tone:String(req.body.voice_tone||"").trim().slice(0,2000),
+    accent:String(req.body.accent||"").trim().slice(0,200),
+    target_audience:String(req.body.target_audience||"").trim().slice(0,1500),
+    niche:String(req.body.niche||"").trim().slice(0,200),
+    video_style:String(req.body.video_style||"").trim().slice(0,500),
+    generator:allowedGenerators.includes(req.body.generator)?req.body.generator:"Higgsfield",
+    character_id:String(req.body.character_id||"").trim().slice(0,500),
+    reference_urls:String(req.body.reference_urls||"").split(/\r?\n/).map(x=>x.trim()).filter(x=>/^https:\/\//i.test(x)).slice(0,3).join("\n").slice(0,6000),
+    phrases_use:String(req.body.phrases_use||"").trim().slice(0,2000),
+    phrases_avoid:String(req.body.phrases_avoid||"").trim().slice(0,2000),
+    brand_rules:String(req.body.brand_rules||"").trim().slice(0,3000),
+    character_lock_prompt:String(req.body.character_lock_prompt||"").trim().slice(0,7000),
+  };
+  if(!a.character_lock_prompt)a.character_lock_prompt=avatarLockPrompt(a);
+  await pool.query(`INSERT INTO avatar_profiles(user_id,avatar_name,presentation,age_range,visual_description,hair_skin_clothing,voice_tone,accent,target_audience,niche,video_style,generator,character_id,reference_urls,phrases_use,phrases_avoid,brand_rules,character_lock_prompt,updated_at)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,NOW())
+    ON CONFLICT(user_id) DO UPDATE SET avatar_name=EXCLUDED.avatar_name,presentation=EXCLUDED.presentation,age_range=EXCLUDED.age_range,visual_description=EXCLUDED.visual_description,hair_skin_clothing=EXCLUDED.hair_skin_clothing,voice_tone=EXCLUDED.voice_tone,accent=EXCLUDED.accent,target_audience=EXCLUDED.target_audience,niche=EXCLUDED.niche,video_style=EXCLUDED.video_style,generator=EXCLUDED.generator,character_id=EXCLUDED.character_id,reference_urls=EXCLUDED.reference_urls,phrases_use=EXCLUDED.phrases_use,phrases_avoid=EXCLUDED.phrases_avoid,brand_rules=EXCLUDED.brand_rules,character_lock_prompt=EXCLUDED.character_lock_prompt,updated_at=NOW()`,
+    [uid,a.avatar_name,a.presentation,a.age_range,a.visual_description,a.hair_skin_clothing,a.voice_tone,a.accent,a.target_audience,a.niche,a.video_style,a.generator,a.character_id,a.reference_urls,a.phrases_use,a.phrases_avoid,a.brand_rules,a.character_lock_prompt]);
+  res.redirect("/avatar");
+});
 app.get("/creatives",requireAuth,(req,res)=>res.send(shell({title:"Creative Studio",user:req.user,active:"creatives",body:`<div class="header"><div><h2>Creative Studio</h2><p>Turn scored products into hooks, scripts and avatar-ready briefs.</p></div></div><section class="card"><div class="empty">Creative generation is the next module.</div></section>`})));
 app.get("/settings",requireAuth,(req,res)=>res.send(shell({title:"Settings",user:req.user,active:"settings",body:`<div class="header"><div><h2>Settings</h2><p>Creator Pro account and integrations.</p></div></div><section class="card"><div class="cardpad"><b>Plan</b><p>Creator Pro — planned launch price: $49/month</p><b>n8n webhook</b><p class="muted">${process.env.N8N_PRODUCT_WEBHOOK?"Configured":"Not configured yet"}</p><b>Public app URL</b><p>${esc(APP_URL)}</p></div></section>`})));
 
