@@ -640,7 +640,7 @@ app.get("/creatives",requireAuth,async(req,res)=>{
   ]);
   const avatar=avatarQ.rows[0]||null;
   const productOptions=productsQ.rows.map(p=>`<option value="${p.id}">${esc(p.name)} — ${Number(p.affiliate_score||0).toFixed(0)}/100</option>`).join("");
-  const history=historyQ.rows.length?historyQ.rows.map(x=>`<tr><td>${esc(x.product_name)}</td><td>${esc(creativeAngleLabel(x.angle))}</td><td>${esc(creativeStyleLabel(x.style))}</td><td>${x.use_avatar?"Avatar":"No avatar"}</td><td>${esc(x.provider||"")}</td><td>${new Date(x.created_at).toLocaleString()}</td></tr>`).join(""):`<tr><td colspan="6" class="muted">No creative packs yet.</td></tr>`;
+  const history=historyQ.rows.length?historyQ.rows.map(x=>`<tr><td><a href="/creatives/${x.id}"><b>${esc(x.product_name)}</b></a></td><td>${esc(creativeAngleLabel(x.angle))}</td><td>${esc(creativeStyleLabel(x.style))}</td><td>${x.use_avatar?"Avatar":"No avatar"}</td><td>${esc(x.provider||"")}</td><td>${new Date(x.created_at).toLocaleString()}</td></tr>`).join(""):`<tr><td colspan="6" class="muted">No creative packs yet.</td></tr>`;
   res.send(shell({title:"Creative Studio",user:req.user,active:"creatives",body:`
   <div class="header"><div><div class="kicker">Execution Layer</div><h2>Creative Studio</h2><p>Turn a scored product into hooks, scripts, scenes and a provider-ready video brief.</p></div></div>
   <section class="hero">
