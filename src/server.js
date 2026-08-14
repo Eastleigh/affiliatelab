@@ -213,7 +213,7 @@ async function migrate(){
     await pool.query("UPDATE users SET role='admin' WHERE id=(SELECT id FROM users ORDER BY created_at,id LIMIT 1)");
   }
   const scoreRows=await pool.query("SELECT key,value FROM app_settings WHERE key LIKE 'score.%'");
-  for(const r of scoreRows){const k=r.key.replace('score.','');if(Object.hasOwn(SCORE_CONFIG,k))SCORE_CONFIG[k]=Number(r.value);}
+  for(const r of scoreRows.rows){const k=r.key.replace('score.','');if(Object.hasOwn(SCORE_CONFIG,k))SCORE_CONFIG[k]=Number(r.value);}
 }
 await migrate();
 
