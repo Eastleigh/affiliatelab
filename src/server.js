@@ -790,10 +790,7 @@ const headers = {"content-type":"application/json"};
 if(secret) headers["x-affiliatelab-secret"] = secret;
   try{
     const r=await fetch(webhook,{method:"POST",headers,body:JSON.stringify(payload),signal:AbortSignal.timeout(15000)});
-    const text=await r.text();
-    let body={}; try{body=text?JSON.parse(text):{}}catch{body={raw:text.slice(0,5000)}}
-    if(!r.ok){
-      await pool.query("UPDATE video_jobs SET status='failed',response_payload=$1::jsonb,error_message=$2,updated_at=NOW() WHERE id=$3",[JSON.stringify(body),`Connector HTTP ${r.status}`,jobId]);
+    
     }else{
       const ext=String(body.job_id||body.id||body.external_job_id||"").slice(0,500);
       const status=String(body.status||"submitted").toLowerCase();
