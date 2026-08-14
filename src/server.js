@@ -788,10 +788,6 @@ payload.callback_url = `${APP_URL}/api/video-jobs/${jobId}/callback`;
 const secret = String(process.env.VIDEO_CALLBACK_SECRET || "").trim();
 const headers = {"content-type":"application/json"};
 if(secret) headers["x-affiliatelab-secret"] = secret;
-
-try {
-  const headers={"content-type":"application/json"};
-  if(secret)headers["x-affiliatelab-secret"]=secret;
   try{
     const r=await fetch(webhook,{method:"POST",headers,body:JSON.stringify(payload),signal:AbortSignal.timeout(15000)});
     const text=await r.text();
