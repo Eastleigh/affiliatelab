@@ -228,6 +228,21 @@ async function migrate(){
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   );
+  CREATE TABLE IF NOT EXISTS creative_packs(
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    use_avatar BOOLEAN NOT NULL DEFAULT TRUE,
+    angle TEXT NOT NULL DEFAULT 'problem_solution',
+    style TEXT NOT NULL DEFAULT 'ugc_direct',
+    hooks JSONB NOT NULL DEFAULT '[]'::jsonb,
+    scripts JSONB NOT NULL DEFAULT '[]'::jsonb,
+    scenes JSONB NOT NULL DEFAULT '[]'::jsonb,
+    video_prompt TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  CREATE INDEX IF NOT EXISTS creative_packs_user_created_idx ON creative_packs(user_id,created_at DESC);
   `);
   const adminEmail=String(process.env.ADMIN_EMAIL||"").trim().toLowerCase();
   if(adminEmail) await pool.query("UPDATE users SET role='admin' WHERE lower(email)=$1",[adminEmail]);
@@ -540,7 +555,147 @@ app.post("/avatar",requireAuth,requireCsrf,async(req,res)=>{
     [uid,a.avatar_name,a.presentation,a.age_range,a.visual_description,a.hair_skin_clothing,a.voice_tone,a.accent,a.target_audience,a.niche,a.video_style,a.generator,a.character_id,a.reference_urls,a.phrases_use,a.phrases_avoid,a.brand_rules,a.character_lock_prompt]);
   res.redirect("/avatar");
 });
-app.get("/creatives",requireAuth,(req,res)=>res.send(shell({title:"Creative Studio",user:req.user,active:"creatives",body:`<div class="header"><div><h2>Creative Studio</h2><p>Turn scored products into hooks, scripts and avatar-ready briefs.</p></div></div><section class="card"><div class="empty">Creative generation is the next module.</div></section>`})));
+function creativeAngleLabel(v){
+  return ({problem_solution:"Problem → Solution",before_after:"Before → After",demo_proof:"Demo / Proof",curiosity:"Curiosity / Pattern Interrupt",testimonial:"Testimonial / Personal Story",comparison:"Comparison / Why This One"})[v]||"Problem → Solution";
+}
+function creativeStyleLabel(v){
+  return ({ugc_direct:"Direct-to-camera UGC",demo:"Product demo",testimonial:"Testimonial",voiceover:"Voiceover + B-roll",faceless:"Faceless / product-only"})[v]||"Direct-to-camera UGC";
+}
+function buildCreativePack(product,avatar,opts){
+  const name=product.name||"this product";
+  const category=product.category||"product";
+  const price=Number(product.price||0);
+  const commission=Number(product.commission_percent||0);
+  const s7=Number(product.sales_7d||0), s30=Number(product.sales_30d||0);
+  const score=Number(product.affiliate_score||0);
+  const angle=opts.angle||"problem_solution";
+  const style=opts.style||"ugc_direct";
+  const avatarName=opts.useAvatar && avatar?.avatar_name ? avatar.avatar_name : "";
+  const audience=opts.useAvatar && avatar?.target_audience ? avatar.target_audience : "TikTok shoppers";
+  const niche=opts.useAvatar && avatar?.niche ? avatar.niche : category;
+  const voice=opts.useAvatar && avatar?.voice_tone ? avatar.voice_tone : "conversational, confident and natural";
+  const intro=avatarName?`${avatarName} speaking in a ${voice} style`:`Creator speaking in a ${voice} style`;
+  const proof=s7>0?`${s7.toLocaleString()} sales in the last 7 days`:s30>0?`${s30.toLocaleString()} sales in 30 days`:`an AffiliateLab opportunity score of ${score.toFixed(0)}`;
+  const priceLine=price>0?`around $${price.toFixed(2)}`:"at the current offer price";
+  const hooks=[
+    `I didn't expect ${name} to be this interesting until I saw ${proof}.`,
+    `If you're into ${niche}, this is the ${category} product I'd look at before it gets crowded.`,
+    `Wait—before you buy another ${category} product, look at what ${name} is doing differently.`,
+    `This is one of those TikTok Shop products that makes sense the second you see the demo.`,
+    `${audience}: here's why ${name} just scored ${score.toFixed(0)}/100 in my product test.`
+  ];
+  const scripts=[
+    {label:"15-second test",text:`${hooks[0]} Here's the quick version: ${name} is priced ${priceLine}, the commission is ${commission||0}%, and the product is showing real momentum. I'd open with the result, show the product immediately, and end with one clear CTA: check the offer while it's still easy to test.`},
+    {label:"30-second UGC",text:`${hooks[2]} I found ${name} while looking at ${category} products with strong momentum. What caught my attention was ${proof}. The offer is ${priceLine}${commission?`, with a ${commission}% affiliate commission`:""}. I'd show the product in use, call out one visible benefit without overclaiming, then finish with: if this solves the problem you're dealing with, tap through and see if it fits you.`},
+    {label:"45-second story/demo",text:`${hooks[4]} I keep seeing creators chase products after they're already saturated, so I wanted to test something earlier. ${name} stood out because it has ${proof}. For the video, I'd start with the problem, show the product within the first three seconds, demonstrate one clear use case, then explain why the offer feels easy to understand. Keep it specific, keep it believable, and let the product do the selling. CTA: check the product page and decide if it's worth trying.`}
+  ];
+  const scenes=[
+    {scene:1,time:"0–3s",shot:"Pattern interrupt / close-up",direction:`Show ${name} immediately. On-screen text uses the strongest hook.`},
+    {scene:2,time:"3–8s",shot:style==="faceless"?"Hands + product":"Creator + product",direction:`Introduce the core problem/desire for ${audience}.`},
+    {scene:3,time:"8–16s",shot:"Demo / proof",direction:`Demonstrate one visible use case. Reference ${proof} as market proof, not a product-performance guarantee.`},
+    {scene:4,time:"16–24s",shot:"Benefit + objection",direction:`Explain why ${name} is interesting at ${priceLine}. Keep claims brand-safe.`},
+    {scene:5,time:"24–30s",shot:"CTA",direction:"One clear CTA. Avoid hype, fake urgency, or unsupported claims."}
+  ];
+  const lock=opts.useAvatar && avatar?.character_lock_prompt ? avatar.character_lock_prompt : "";
+  const visual=opts.useAvatar && avatar ? [avatar.visual_description,avatar.hair_skin_clothing,avatar.video_style].filter(Boolean).join(" ") : "";
+  const provider=opts.useAvatar && avatar?.generator ? avatar.generator : (style==="faceless"?"Manual / Seedance":"Higgsfield");
+  const videoPrompt=[
+    `Create a vertical 9:16 TikTok-style ${creativeStyleLabel(style)} video for ${name}.`,
+    `Creative angle: ${creativeAngleLabel(angle)}.`,
+    `Audience: ${audience}. Tone: ${voice}.`,
+    visual?`Visual direction: ${visual}`:"",
+    lock?`CHARACTER LOCK: ${lock}`:"",
+    `Scene flow: ${scenes.map(s=>`${s.time} ${s.direction}`).join(" | ")}`,
+    `Use natural handheld pacing, believable lighting, product-first framing, readable captions, and a native social-media feel.`,
+    `Do not invent medical, financial, or performance claims. Keep the same product appearance and, when avatar mode is on, the same character identity across every scene.`
+  ].filter(Boolean).join("\n");
+  return {hooks,scripts,scenes,video_prompt:videoPrompt,provider};
+}
+
+app.get("/creatives",requireAuth,async(req,res)=>{
+  const uid=+req.user.sub;
+  const [productsQ,avatarQ,historyQ]=await Promise.all([
+    pool.query(`SELECT p.id,p.name,p.category,p.price,p.commission_percent,p.sales_7d,p.sales_30d,p.affiliate_score,p.status
+      FROM products p WHERE p.user_id=$1 ORDER BY p.affiliate_score DESC NULLS LAST,p.updated_at DESC LIMIT 100`,[uid]),
+    pool.query("SELECT * FROM avatar_profiles WHERE user_id=$1",[uid]),
+    pool.query(`SELECT cp.*,p.name AS product_name FROM creative_packs cp JOIN products p ON p.id=cp.product_id
+      WHERE cp.user_id=$1 ORDER BY cp.created_at DESC LIMIT 10`,[uid])
+  ]);
+  const avatar=avatarQ.rows[0]||null;
+  const productOptions=productsQ.rows.map(p=>`<option value="${p.id}">${esc(p.name)} — ${Number(p.affiliate_score||0).toFixed(0)}/100</option>`).join("");
+  const history=historyQ.rows.length?historyQ.rows.map(x=>`<tr><td>${esc(x.product_name)}</td><td>${esc(creativeAngleLabel(x.angle))}</td><td>${esc(creativeStyleLabel(x.style))}</td><td>${x.use_avatar?"Avatar":"No avatar"}</td><td>${esc(x.provider||"")}</td><td>${new Date(x.created_at).toLocaleString()}</td></tr>`).join(""):`<tr><td colspan="6" class="muted">No creative packs yet.</td></tr>`;
+  res.send(shell({title:"Creative Studio",user:req.user,active:"creatives",body:`
+  <div class="header"><div><div class="kicker">Execution Layer</div><h2>Creative Studio</h2><p>Turn a scored product into hooks, scripts, scenes and a provider-ready video brief.</p></div></div>
+  <section class="hero">
+    <div class="card"><div class="cardpad"><div class="kicker">1. Product</div><h3>Choose what to promote</h3><p class="muted">Your highest-scoring products are listed first.</p></div></div>
+    <div class="card"><div class="cardpad"><div class="kicker">2. Identity</div><h3>${avatar?esc(avatar.avatar_name||"Saved avatar"):"No avatar saved"}</h3><p class="muted">${avatar?`Default generator: ${esc(avatar.generator||"Higgsfield")}`:`Create an avatar profile first, or generate faceless creative.`}</p></div></div>
+  </section>
+  <section class="card"><div class="head">Generate Creative Pack</div><div class="cardpad">
+    ${productsQ.rows.length?`<form method="post" action="/creatives/generate"><input type="hidden" name="_csrf" value="${esc(req.user.csrf)}">
+      <div class="grid2">
+        <div>
+          <div class="field"><label>Product</label><select name="product_id" required>${productOptions}</select></div>
+          <div class="field"><label>Creative angle</label><select name="angle">
+            <option value="problem_solution">Problem → Solution</option><option value="before_after">Before → After</option><option value="demo_proof">Demo / Proof</option>
+            <option value="curiosity">Curiosity / Pattern Interrupt</option><option value="testimonial">Testimonial / Personal Story</option><option value="comparison">Comparison / Why This One</option>
+          </select></div>
+        </div>
+        <div>
+          <div class="field"><label>Video style</label><select name="style">
+            <option value="ugc_direct">Direct-to-camera UGC</option><option value="demo">Product demo</option><option value="testimonial">Testimonial</option><option value="voiceover">Voiceover + B-roll</option><option value="faceless">Faceless / product-only</option>
+          </select></div>
+          <div class="field"><label>Avatar mode</label><select name="use_avatar">
+            <option value="1" ${avatar?"":"disabled"}>Use My Avatar${avatar?` — ${esc(avatar.avatar_name||"saved profile")}`:" (create one first)"}</option>
+            <option value="0">Off — faceless / generic creator</option>
+          </select></div>
+        </div>
+      </div>
+      <div class="actions"><button class="btn primary">Generate Creative Pack</button><a class="btn" href="/avatar">Edit My Avatar</a></div>
+    </form>`:`<div class="empty">Add or import a product first, then return here to generate creative.</div>`}
+  </div></section>
+  <section class="card" style="margin-top:20px"><div class="head">Recent Creative Packs</div><div class="tablewrap"><table><thead><tr><th>Product</th><th>Angle</th><th>Style</th><th>Identity</th><th>Provider</th><th>Created</th></tr></thead><tbody>${history}</tbody></table></div></section>
+  `}));
+});
+
+app.post("/creatives/generate",requireAuth,requireCsrf,async(req,res)=>{
+  const uid=+req.user.sub;
+  const productId=Number(req.body.product_id);
+  if(!Number.isInteger(productId)||productId<=0)return res.status(400).send("Invalid product.");
+  const angle=["problem_solution","before_after","demo_proof","curiosity","testimonial","comparison"].includes(req.body.angle)?req.body.angle:"problem_solution";
+  const style=["ugc_direct","demo","testimonial","voiceover","faceless"].includes(req.body.style)?req.body.style:"ugc_direct";
+  const useAvatar=String(req.body.use_avatar)==="1";
+  const [pq,aq]=await Promise.all([
+    pool.query("SELECT * FROM products WHERE id=$1 AND user_id=$2",[productId,uid]),
+    pool.query("SELECT * FROM avatar_profiles WHERE user_id=$1",[uid])
+  ]);
+  const product=pq.rows[0];
+  if(!product)return res.status(404).send("Product not found.");
+  const avatar=aq.rows[0]||null;
+  const pack=buildCreativePack(product,avatar,{angle,style,useAvatar:useAvatar&&!!avatar});
+  const ins=await pool.query(`INSERT INTO creative_packs(user_id,product_id,use_avatar,angle,style,hooks,scripts,scenes,video_prompt,provider)
+    VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8::jsonb,$9,$10) RETURNING id`,
+    [uid,productId,useAvatar&&!!avatar,angle,style,JSON.stringify(pack.hooks),JSON.stringify(pack.scripts),JSON.stringify(pack.scenes),pack.video_prompt,pack.provider]);
+  res.redirect(`/creatives/${ins.rows[0].id}`);
+});
+
+app.get("/creatives/:id",requireAuth,async(req,res)=>{
+  const uid=+req.user.sub,id=Number(req.params.id);
+  if(!Number.isInteger(id))return res.status(404).send("Not found.");
+  const q=await pool.query(`SELECT cp.*,p.name AS product_name,p.affiliate_score,p.category,p.price,p.commission_percent
+    FROM creative_packs cp JOIN products p ON p.id=cp.product_id WHERE cp.id=$1 AND cp.user_id=$2`,[id,uid]);
+  const c=q.rows[0]; if(!c)return res.status(404).send("Creative pack not found.");
+  const hooks=Array.isArray(c.hooks)?c.hooks:JSON.parse(c.hooks||"[]");
+  const scripts=Array.isArray(c.scripts)?c.scripts:JSON.parse(c.scripts||"[]");
+  const scenes=Array.isArray(c.scenes)?c.scenes:JSON.parse(c.scenes||"[]");
+  res.send(shell({title:"Creative Pack",user:req.user,active:"creatives",body:`
+    <div class="header"><div><div class="kicker">${esc(creativeAngleLabel(c.angle))}</div><h2>${esc(c.product_name)} Creative Pack</h2><p>${esc(creativeStyleLabel(c.style))} · ${c.use_avatar?"My Avatar":"No avatar"} · ${esc(c.provider||"")}</p></div><div class="actions"><a class="btn" href="/creatives">New Pack</a></div></div>
+    <section class="card"><div class="head">5 Hooks</div><div class="cardpad">${hooks.map((h,i)=>`<div class="card" style="margin-bottom:10px"><div class="cardpad"><div class="kicker">Hook ${i+1}</div><b>${esc(h)}</b></div></div>`).join("")}</div></section>
+    <div class="header" style="margin-top:20px"><div><h3>Scripts</h3><p>Three lengths for rapid testing.</p></div></div>
+    <section class="hero">${scripts.map(s=>`<div class="card"><div class="cardpad"><div class="kicker">${esc(s.label)}</div><p>${esc(s.text)}</p></div></div>`).join("")}</section>
+    <section class="card" style="margin-top:20px"><div class="head">Scene Breakdown</div><div class="tablewrap"><table><thead><tr><th>Scene</th><th>Time</th><th>Shot</th><th>Direction</th></tr></thead><tbody>${scenes.map(s=>`<tr><td>${s.scene}</td><td>${esc(s.time)}</td><td>${esc(s.shot)}</td><td>${esc(s.direction)}</td></tr>`).join("")}</tbody></table></div></section>
+    <section class="card" style="margin-top:20px"><div class="head">${esc(c.provider||"Video")} Prompt</div><div class="cardpad"><textarea style="min-height:320px" readonly>${esc(c.video_prompt)}</textarea><p class="muted">This is provider-ready prompt text. Direct API submission comes in the connector phase.</p></div></section>
+  `}));
+});
 app.get("/settings",requireAuth,(req,res)=>res.send(shell({title:"Settings",user:req.user,active:"settings",body:`<div class="header"><div><h2>Settings</h2><p>Creator Pro account and integrations.</p></div></div><section class="card"><div class="cardpad"><b>Plan</b><p>Creator Pro — planned launch price: $49/month</p><b>n8n webhook</b><p class="muted">${process.env.N8N_PRODUCT_WEBHOOK?"Configured":"Not configured yet"}</p><b>Public app URL</b><p>${esc(APP_URL)}</p></div></section>`})));
 
 app.use((err,req,res,next)=>{console.error(err);res.status(500).send(isProd?"Something went wrong.":`<pre>${esc(err.stack)}</pre>`);});
