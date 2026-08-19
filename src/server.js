@@ -701,14 +701,17 @@ app.get("/creatives/:id",requireAuth,async(req,res)=>{
   const [q,jq]=await Promise.all([
     pool.query(`SELECT cp.*,p.name AS product_name,p.affiliate_score,p.category,p.price,p.commission_percent
       FROM creative_packs cp JOIN products p ON p.id=cp.product_id WHERE cp.id=$1 AND cp.user_id=$2`,[id,uid]),
-    pool.query(`SELECT * FROM video_jobs WHERE creative_pack_id=$1 AND user_id=$2 ORDER BY created_at DESC LIMIT 10`,[id,uid])
+ pool.query(`SELECT *, id AS video_job_id
+FROM video_jobs
+WHERE creative_pack_id=$1 AND user_id=$2
+ORDER BY created_at DESC LIMIT 10`, [id,uid])
   ]);
   const c=q.rows[0]; if(!c)return res.status(404).send("Creative pack not found.");
   const hooks=Array.isArray(c.hooks)?c.hooks:JSON.parse(c.hooks||"[]");
   const scripts=Array.isArray(c.scripts)?c.scripts:JSON.parse(c.scripts||"[]");
   const scenes=Array.isArray(c.scenes)?c.scenes:JSON.parse(c.scenes||"[]");
   const copyBtn=(label,target)=>`<button class="btn" type="button" onclick="copyText('${target}',this)">${label}</button>`;
-  const jobs=jq.rows.length?jq.rows.map(j=>`<tr><td>#${j.id}</td><td>${esc(j.provider)}</td><td><span class="pill ${j.status==="completed"?"winner":j.status==="failed"?"testing":"new"}">${esc(j.status)}</span></td><td>${j.video_url?`<a href="${esc(j.video_url)}" target="_blank" rel="noopener">Open video</a>`:"—"}</td><td>${j.error_message?esc(j.error_message):"—"}</td><td><a href="/video-jobs/${j.id}" class="btn">View</a></td></tr>`).join(""):`<tr><td colspan="6" class="muted">No video jobs yet.</td></tr>`;
+  const jobs=jq.rows.length?jq.rows.map(j=>`<tr><td>#$#${j.video_job_id}</td><td>${esc(j.provider)}</td><td><span class="pill ${j.status==="completed"?"winner":j.status==="failed"?"testing":"new"}">${esc(j.status)}</span></td><td>${j.video_url?`<a href="${esc(j.video_url)}" target="_blank" rel="noopener">Open video</a>`:"—"}</td><td>${j.error_message?esc(j.error_message):"—"}</td><td><a href="/video-jobs/${j.video_job_id}" class="btn">View</a></td></tr>`).join(""):`<tr><td colspan="6" class="muted">No video jobs yet.</td></tr>`;
   res.send(shell({title:"Creative Pack",user:req.user,active:"creatives",body:`
     <script>
       async function copyText(id,btn){
