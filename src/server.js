@@ -958,7 +958,7 @@ app.post("/creatives/:id/video",requireAuth,requireCsrf,async(req,res)=>{
 
 app.get("/video-jobs/:id",requireAuth,async(req,res)=>{
   const uid=+req.user.sub,id=Number(req.params.id);
-  const q=await pool.query(`SELECT vj.*,cp.video_prompt,p.name AS product_name
+  const q=await pool.query(`SELECT vj.*,vj.creative_pack_id AS creative_pack_id,cp.video_prompt,p.name AS product_name
     FROM video_jobs vj JOIN creative_packs cp ON cp.id=vj.creative_pack_id JOIN products p ON p.id=cp.product_id
     WHERE vj.id=$1 AND vj.user_id=$2`,[id,uid]);
   const j=q.rows[0]; if(!j)return res.status(404).send("Video job not found.");
